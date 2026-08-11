@@ -27,6 +27,7 @@ pub use permanent_password::{
     preset_permanent_password_storage_is_usable_for_auth, ENCRYPT_MAX_LEN,
 };
 use permanent_password::{
+    decode_legacy_permanent_password_h1_from_storage,
     decode_permanent_password_h1_from_hashed_storage, decrypt_permanent_password_str_or_original,
     encode_permanent_password_encrypted_storage_from_h1, password_is_empty_or_not_hashed,
     preset_permanent_password_storage_matches_plain, DEFAULT_SALT_LEN, PASSWORD_ENC_VERSION,
@@ -612,8 +613,11 @@ impl Config {
     fn load() -> Config {
         let mut config = Config::load_::<Config>("");
         let mut store = false;
-        if let Err(err) = Self::validate_or_decrypt_permanent_password_storage(&mut config) {
-            log::error!("Failed to validate or decrypt permanent password storage: {err}");
+        match Self::validate_or_decrypt_permanent_password_storage(&mut config) {
+            Ok(should_store) => store |= should_store,
+            Err(err) => {
+                log::error!("Failed to validate or decrypt permanent password storage: {err}");
+            }
         }
         let mut id_valid = false;
         let (id, encrypted, store2) = decrypt_str_or_original(&config.enc_id, PASSWORD_ENC_VERSION);
@@ -653,9 +657,9 @@ impl Config {
         config
     }
 
-    fn validate_or_decrypt_permanent_password_storage(config: &mut Config) -> Result<()> {
+    fn validate_or_decrypt_permanent_password_storage(config: &mut Config) -> Result<bool> {
         if config.password.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         if config.password.starts_with(PASSWORD_ENC_VERSION) {
@@ -663,12 +667,19 @@ impl Config {
                 decrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION);
             if decrypted {
                 config.password = plain;
-                return Ok(());
+                return Ok(false);
             }
             if !should_store {
                 return Err(anyhow!("Invalid permanent password encrypted hash storage"));
             }
-            return Ok(());
+            return Ok(false);
+        }
+
+        if let Some(h1) = decode_legacy_permanent_password_h1_from_storage(&config.password) {
+            Self::ensure_permanent_password_hash_salt(config)?;
+            config.password = encode_permanent_password_encrypted_storage_from_h1(&h1)
+                .ok_or_else(|| anyhow!("Failed to encrypt legacy permanent password storage"))?;
+            return Ok(true);
         }
 
         let (decrypted_storage, decrypted, _) =
@@ -676,12 +687,12 @@ impl Config {
         if decrypted {
             Self::ensure_permanent_password_hash_salt(config)?;
             if decode_permanent_password_h1_from_hashed_storage(&decrypted_storage).is_some() {
-                return Ok(());
+                return Ok(false);
             }
             return Err(anyhow!("Invalid permanent password encrypted hash storage"));
         }
 
-        Ok(())
+        Ok(false)
     }
 
     fn ensure_permanent_password_hash_salt(config: &Config) -> Result<()> {
@@ -3463,7 +3474,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.password = "p@ssw0rd".to_owned();
         cfg.salt = "".to_owned();
-        Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap();
+        assert!(!Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap());
         assert_eq!(cfg.password, "p@ssw0rd");
         assert!(cfg.salt.is_empty());
     }
@@ -3475,9 +3486,34 @@ mod tests {
             encrypt_str_or_original("legacy-secret", PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
         cfg.password = legacy_storage;
         cfg.salt = "".to_owned();
-        Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap();
+        assert!(!Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap());
         assert_eq!(cfg.password, "legacy-secret");
         assert!(cfg.salt.is_empty());
+    }
+
+    #[test]
+    fn test_validate_or_decrypt_migrates_legacy_01_hashed_permanent_password() {
+        let salt = "salt123";
+        let h1 = compute_permanent_password_h1("p@ssw0rd", salt);
+        let legacy_storage = "01".to_owned() + &base64::encode(h1, base64::Variant::Original);
+        let mut cfg = Config::default();
+        cfg.password = legacy_storage.clone();
+        cfg.salt = salt.to_owned();
+
+        assert_eq!(
+            decode_permanent_password_h1_from_storage(&legacy_storage),
+            Some(h1)
+        );
+        assert!(Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap());
+        assert_ne!(cfg.password, legacy_storage);
+        assert_eq!(
+            decode_permanent_password_h1_from_storage(&cfg.password),
+            Some(h1)
+        );
+        assert!(local_permanent_password_storage_is_usable_for_auth(
+            &cfg.password,
+            &cfg.salt
+        ));
     }
 
     #[test]

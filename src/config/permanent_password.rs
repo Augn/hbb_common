@@ -9,6 +9,7 @@ use crate::{
 pub(super) const PASSWORD_ENC_VERSION: &str = "00";
 pub(super) const PERMANENT_PASSWORD_ENC_VERSION: &str = "01";
 pub(super) const PERMANENT_PASSWORD_HASH_PREFIX: &str = "00";
+const LEGACY_PERMANENT_PASSWORD_HASH_PREFIX: &str = "01";
 const HBBS_PRESET_PASSWORD_HASH_PREFIX: &str = "00";
 pub(super) const PERMANENT_PASSWORD_H1_LEN: usize = 32;
 pub(super) const DEFAULT_SALT_LEN: usize = 32;
@@ -179,12 +180,22 @@ pub fn decode_permanent_password_h1_from_storage(
 ) -> Option<[u8; PERMANENT_PASSWORD_H1_LEN]> {
     if storage.starts_with(PERMANENT_PASSWORD_ENC_VERSION) {
         let (hashed_storage, decrypted, _) = decrypt_permanent_password_str_or_original(storage);
-        if !decrypted {
-            return None;
+        if decrypted {
+            return decode_permanent_password_h1_from_hashed_storage(&hashed_storage);
         }
-        return decode_permanent_password_h1_from_hashed_storage(&hashed_storage);
     }
-    None
+
+    decode_legacy_permanent_password_h1_from_storage(storage)
+}
+
+pub(super) fn decode_legacy_permanent_password_h1_from_storage(
+    storage: &str,
+) -> Option<[u8; PERMANENT_PASSWORD_H1_LEN]> {
+    // Before permanent-password storage was encrypted, local H1 values used the same "01"
+    // prefix that now identifies the encrypted container. The legacy payload decodes to
+    // exactly one H1, while the encrypted container is longer, so the formats remain
+    // unambiguous.
+    decode_password_h1_after_prefix(storage, LEGACY_PERMANENT_PASSWORD_HASH_PREFIX)
 }
 
 // Salt can be updated only when the password is empty, plaintext, or decryptable
